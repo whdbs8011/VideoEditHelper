@@ -15,7 +15,7 @@ class PremiereBuilderTests(unittest.TestCase):
             project = tmp_path / "프로젝트.prproj"
             media = tmp_path / "미디어" / "클립.mp4"
             config = BuildConfig(
-                csv_path=tmp_path / "storyboard.csv",
+                storyboard_path=tmp_path / "storyboard.csv",
                 media_root=tmp_path / "미디어",
                 project_path=project,
                 sequence_name="메인 시퀀스",
@@ -33,6 +33,8 @@ class PremiereBuilderTests(unittest.TestCase):
         self.assertIn("String.fromCharCode(", script)
         self.assertIn("start:1.25,duration:3.5,track:1,row:2", script)
         self.assertIn("sequence.overwriteClip", script)
+        self.assertIn("getOrImportItem", script)
+        self.assertIn("itemCache", script)
         self.assertNotIn(str(media), script)
 
 

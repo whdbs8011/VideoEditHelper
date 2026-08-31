@@ -209,6 +209,10 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Local spreadsheet inspection and generated deliverables
+outputs/
+spreadsheet_work/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

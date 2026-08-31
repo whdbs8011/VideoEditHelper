@@ -5,19 +5,20 @@
     <meta name="viewport" content="width=device-width" />
     <title>Storyboard Builder</title>
     <link rel="stylesheet" href="./style.css" />
+    <script src="./vendor/xlsx.full.min.js"></script>
     <script src="./index.js"></script>
   </head>
   <body>
     <main>
       <header>
         <sp-heading size="L">Storyboard Builder</sp-heading>
-        <sp-body>CSV의 미디어를 현재 Premiere 시퀀스에 배치합니다.</sp-body>
+        <sp-body>CSV 또는 Excel의 미디어를 현재 Premiere 시퀀스에 배치합니다.</sp-body>
       </header>
 
-      <sp-field-label>스토리보드 CSV</sp-field-label>
+      <sp-field-label>스토리보드 파일 (CSV/XLSX)</sp-field-label>
       <div class="path-row">
-        <sp-textfield id="csv-path" readonly placeholder="CSV 파일 선택"></sp-textfield>
-        <sp-button id="pick-csv" variant="secondary">선택</sp-button>
+        <sp-textfield id="storyboard-path" readonly placeholder="CSV 또는 XLSX 파일 선택"></sp-textfield>
+        <sp-button id="pick-storyboard" variant="secondary">선택</sp-button>
       </div>
 
       <sp-field-label>미디어 루트 폴더</sp-field-label>

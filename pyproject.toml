@@ -1,7 +1,7 @@
 [project]
 name = "premiere-storyboard-builder"
 version = "1.0.0"
-description = "Build Adobe Premiere Pro timelines from storyboard CSV files"
+description = "Build Adobe Premiere Pro timelines from CSV or XLSX storyboards"
 requires-python = ">=3.10"
 dependencies = ["pymiere==1.4.1"]
 

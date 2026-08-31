@@ -85,6 +85,7 @@ def generate_jsx(
     var isWindows = $.os.toLowerCase().indexOf("windows") >= 0;
     var importedCount = 0;
     var placedCount = 0;
+    var itemCache = {{}};
 
     function normalizedPath(value) {{
         var result = String(value || "").split(slash).join("/");
@@ -110,6 +111,26 @@ def generate_jsx(
             }}
         }}
         return null;
+    }}
+
+    function getOrImportItem(project, targetBin, row) {{
+        var cacheKey = "$" + normalizedPath(row.path);
+        if (Object.prototype.hasOwnProperty.call(itemCache, cacheKey)) {{
+            return itemCache[cacheKey];
+        }}
+        var item = findItemByPath(project.rootItem, row.path);
+        if (!item) {{
+            if (!project.importFiles([row.path], true, targetBin, false)) {{
+                throw new Error("Import failed for storyboard row " + row.row + ": " + row.path);
+            }}
+            importedCount++;
+            item = findItemByPath(project.rootItem, row.path);
+            if (!item) {{
+                throw new Error("Imported item could not be located: " + row.path);
+            }}
+        }}
+        itemCache[cacheKey] = item;
+        return item;
     }}
 
     function getOrCreateBin(root, wantedName) {{
@@ -166,21 +187,11 @@ def generate_jsx(
         for (var r = 0; r < rows.length; r++) {{
             var row = rows[r];
             if (row.track < 0 || row.track >= sequence.videoTracks.numTracks) {{
-                throw new Error("CSV row " + row.row + ": video track " + (row.track + 1) +
+                throw new Error("Storyboard row " + row.row + ": video track " + (row.track + 1) +
                     " does not exist in sequence " + sequence.name);
             }}
 
-            var item = findItemByPath(project.rootItem, row.path);
-            if (!item) {{
-                if (!project.importFiles([row.path], true, targetBin, false)) {{
-                    throw new Error("Import failed for CSV row " + row.row + ": " + row.path);
-                }}
-                importedCount++;
-                item = findItemByPath(project.rootItem, row.path);
-                if (!item) {{
-                    throw new Error("Imported item could not be located: " + row.path);
-                }}
-            }}
+            var item = getOrImportItem(project, targetBin, row);
 
             var audioTrack = -1;
             if (placeAudio && sequence.audioTracks.numTracks > 0) {{

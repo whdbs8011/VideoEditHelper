@@ -26,11 +26,12 @@ SUPPORTED_MEDIA_EXTENSIONS: Final[frozenset[str]] = frozenset(
 )
 DEFAULT_BIN_NAME: Final[str] = "Storyboard Media"
 DEFAULT_JSX_NAME: Final[str] = "storyboard_build.jsx"
+SUPPORTED_STORYBOARD_EXTENSIONS: Final[frozenset[str]] = frozenset({".csv", ".xlsx"})
 
 
 @dataclass(frozen=True, slots=True)
 class StoryboardItem:
-    """One validated row from the storyboard CSV.
+    """One validated row from a storyboard file.
 
     ``track_index`` is one-based to match the Premiere Pro user interface.
     ``duration`` is the visible timeline duration in seconds, when supplied.
@@ -58,7 +59,7 @@ class ResolvedStoryboardItem:
 class BuildConfig:
     """Runtime settings used to generate and execute the Premiere script."""
 
-    csv_path: Path
+    storyboard_path: Path
     media_root: Path
     project_path: Path
     sequence_name: str | None = None

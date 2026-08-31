@@ -2,14 +2,14 @@
 
 /** @type {import('@adobe/premierepro').premierepro} */
 const ppro = require("premierepro");
-const { localFileSystem } = require("uxp").storage;
+const { localFileSystem, formats } = require("uxp").storage;
 
 const MEDIA_EXTENSIONS = new Set([
   "avi", "jpeg", "jpg", "m4v", "mkv", "mov", "mp4", "mxf",
   "png", "tif", "tiff", "wav", "webm"
 ]);
 
-let selectedCsv = null;
+let selectedStoryboard = null;
 let selectedMediaFolder = null;
 
 function setStatus(kind, message, details = "") {
@@ -58,7 +58,7 @@ function parseCsv(text) {
 }
 
 function parseTime(value, fieldName, rowNumber) {
-  const text = String(value || "").trim();
+  const text = String(value === null || value === undefined ? "" : value).trim();
   if (!text) throw new Error(`${rowNumber}행: ${fieldName} 값이 비어 있습니다.`);
   let seconds;
   const match = /^(\d+):([0-5]?\d):([0-5]?\d(?:\.\d+)?)$/.exec(text);
@@ -70,7 +70,17 @@ function parseTime(value, fieldName, rowNumber) {
   return seconds;
 }
 
-function parseStoryboard(text) {
+function validateMediaRequest(value, rowNumber) {
+  const fileName = String(value ?? "").trim();
+  if (!fileName) throw new Error(`${rowNumber}행: file_name 값이 비어 있습니다.`);
+  const normalized = fileName.replace(/\\/g, "/");
+  if (/^(?:\/|[A-Za-z]:\/)/.test(normalized) || normalized.split("/").includes("..")) {
+    throw new Error(`${rowNumber}행: file_name은 미디어 폴더 기준 상대 경로여야 합니다.`);
+  }
+  return fileName;
+}
+
+function parseCsvStoryboard(text) {
   const records = parseCsv(text.replace(/^\uFEFF/, ""));
   if (!records.length) throw new Error("CSV가 비어 있습니다.");
   const headers = records[0].map(value => value.trim());
@@ -82,8 +92,7 @@ function parseStoryboard(text) {
     if (records[index].every(value => !value.trim())) continue;
     const source = Object.fromEntries(headers.map((header, column) => [header, records[index][column] || ""]));
     const rowNumber = index + 1;
-    const fileName = source.file_name.trim();
-    if (!fileName) throw new Error(`${rowNumber}행: file_name 값이 비어 있습니다.`);
+    const fileName = validateMediaRequest(source.file_name, rowNumber);
     const durationText = (source.duration || "").trim();
     const duration = durationText ? parseTime(durationText, "duration", rowNumber) : null;
     if (duration === 0) throw new Error(`${rowNumber}행: duration은 0보다 커야 합니다.`);
@@ -104,36 +113,233 @@ function parseStoryboard(text) {
   return rows;
 }
 
-async function indexMedia(folder, relativePrefix = "", output = []) {
-  const entries = await folder.getEntries();
-  for (const entry of entries) {
-    const relativePath = relativePrefix ? `${relativePrefix}/${entry.name}` : entry.name;
-    if (entry.isFolder) await indexMedia(entry, relativePath, output);
-    else {
-      const extension = entry.name.includes(".") ? entry.name.split(".").pop().toLowerCase() : "";
-      if (MEDIA_EXTENSIONS.has(extension)) {
-        output.push({
-          name: entry.name,
-          stem: entry.name.slice(0, -(extension.length + 1)),
-          relativePath,
-          nativePath: localFileSystem.getNativePath(entry)
-        });
+function normalizeHeader(value) {
+  return String(value === null || value === undefined ? "" : value)
+    .normalize("NFC")
+    .replace(/\s+/g, "")
+    .toLocaleLowerCase();
+}
+
+function headerMap(record) {
+  const result = new Map();
+  record.forEach((value, column) => {
+    const normalized = normalizeHeader(value);
+    if (normalized) result.set(normalized, column);
+  });
+  return result;
+}
+
+function parseNormalizedMatrix(records, headerIndex, headers) {
+  const rows = [];
+  for (let index = headerIndex + 1; index < records.length; index += 1) {
+    const record = records[index] || [];
+    if (record.every(value => value === "" || value === null || value === undefined)) continue;
+    const rowNumber = index + 1;
+    const get = name => headers.has(name) ? record[headers.get(name)] : "";
+    const fileName = validateMediaRequest(get("file_name"), rowNumber);
+    const durationValue = get("duration");
+    const durationText = String(durationValue ?? "").trim();
+    const duration = durationText ? parseTime(durationValue, "duration", rowNumber) : null;
+    if (duration === 0) throw new Error(`${rowNumber}행: duration은 0보다 커야 합니다.`);
+    const trackValue = get("track_index");
+    const trackText = String(trackValue ?? "").trim();
+    const trackIndex = trackText ? Number(trackValue) : 1;
+    if (!Number.isInteger(trackIndex) || trackIndex < 1) {
+      throw new Error(`${rowNumber}행: track_index는 1 이상의 정수여야 합니다.`);
+    }
+    rows.push({
+      fileName,
+      start: parseTime(get("start_time"), "start_time", rowNumber),
+      duration,
+      track: trackIndex - 1,
+      sourceRow: rowNumber
+    });
+  }
+  return rows;
+}
+
+function parseLegacyTime(value, fieldName, rowNumber) {
+  if (typeof value === "number") {
+    const seconds = Math.round(value * 86400 * 1000000) / 1000000;
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds;
+  }
+  return parseTime(value, fieldName, rowNumber);
+}
+
+function assignLegacyTracks(rows) {
+  const trackEnds = [];
+  const chronological = rows.map((_, index) => index).sort((left, right) =>
+    rows[left].start - rows[right].start || rows[left].sourceRow - rows[right].sourceRow
+  );
+  for (const rowIndex of chronological) {
+    const row = rows[rowIndex];
+    const end = row.start + (row.duration === null ? 0 : row.duration);
+    let track = trackEnds.findIndex(trackEnd => trackEnd <= row.start + 0.000001);
+    if (track < 0) {
+      track = trackEnds.length;
+      trackEnds.push(end);
+    } else {
+      trackEnds[track] = end;
+    }
+    row.track = track;
+  }
+  return rows;
+}
+
+function parseLegacyMatrix(records, headerIndex, headers) {
+  const rows = [];
+  const cutColumn = headers.get("컷번호");
+  const startColumn = headers.get("시작시간");
+  const durationColumn = headers.has("길이(초)") ? headers.get("길이(초)") : headers.get("길이초");
+  const endColumn = headers.get("종료시간");
+  for (let index = headerIndex + 1; index < records.length; index += 1) {
+    const record = records[index] || [];
+    const cutValue = record[cutColumn];
+    if (cutValue === "" || cutValue === null || cutValue === undefined) continue;
+    const rowNumber = index + 1;
+    const fileName = validateMediaRequest(cutValue, rowNumber);
+    const start = parseLegacyTime(record[startColumn], "start_time", rowNumber);
+    const durationValue = durationColumn === undefined ? "" : record[durationColumn];
+    let duration = null;
+    if (durationValue !== "" && durationValue !== null && durationValue !== undefined) {
+      duration = parseTime(durationValue, "duration", rowNumber);
+    } else if (endColumn !== undefined) {
+      duration = parseLegacyTime(record[endColumn], "end_time", rowNumber) - start;
+    }
+    if (duration !== null && duration <= 0) {
+      throw new Error(`${rowNumber}행: duration은 0보다 커야 합니다.`);
+    }
+    rows.push({
+      fileName,
+      start,
+      duration,
+      track: 0,
+      sourceRow: rowNumber
+    });
+  }
+  return assignLegacyTracks(rows);
+}
+
+function parseXlsxStoryboard(arrayBuffer) {
+  if (!window.XLSX) throw new Error("내장 XLSX 모듈을 불러오지 못했습니다.");
+  const workbook = window.XLSX.read(new Uint8Array(arrayBuffer), {
+    type: "array",
+    cellDates: false
+  });
+  let legacyCandidate = null;
+  for (const sheetName of workbook.SheetNames) {
+    const records = window.XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+      header: 1,
+      raw: true,
+      defval: ""
+    });
+    for (let index = 0; index < records.length; index += 1) {
+      const headers = headerMap(records[index] || []);
+      if (headers.has("file_name") && headers.has("start_time")) {
+        const rows = parseNormalizedMatrix(records, index, headers);
+        if (rows.length) return rows;
+      }
+      const hasLegacyDuration = headers.has("길이(초)") || headers.has("길이초") || headers.has("종료시간");
+      if (headers.has("컷번호") && headers.has("시작시간") && hasLegacyDuration) {
+        legacyCandidate = { records, headerIndex: index, headers };
       }
     }
   }
-  return output;
+  if (legacyCandidate) {
+    const rows = parseLegacyMatrix(
+      legacyCandidate.records,
+      legacyCandidate.headerIndex,
+      legacyCandidate.headers
+    );
+    if (rows.length) return rows;
+  }
+  throw new Error("XLSX에서 file_name/start_time 또는 컷 번호/시작 시간/길이(초) 머리글을 찾지 못했습니다.");
 }
 
-function resolveMedia(rows, mediaFiles) {
-  const folded = value => value.replace(/\\/g, "/").toLocaleLowerCase();
+async function parseStoryboardFile(file) {
+  const extension = file.name.includes(".") ? file.name.split(".").pop().toLowerCase() : "";
+  if (extension === "csv") return parseCsvStoryboard(await file.read());
+  if (extension === "xlsx") {
+    return parseXlsxStoryboard(await file.read({ format: formats.binary }));
+  }
+  throw new Error(`지원하지 않는 스토리보드 형식입니다: .${extension || "(없음)"}`);
+}
+
+function foldPath(value) {
+  return String(value).replace(/\\/g, "/").toLocaleLowerCase();
+}
+
+function appendLookup(map, key, value) {
+  if (!map.has(key)) map.set(key, []);
+  map.get(key).push(value);
+}
+
+function createMediaLookup(rows) {
+  const requestedRelative = new Set();
+  const requestedNames = new Set();
+  const requestedStems = new Set();
+  for (const row of rows) {
+    const requested = foldPath(row.fileName);
+    requestedRelative.add(requested);
+    const basename = requested.split("/").pop();
+    if (/\.[^/]+$/.test(requested)) requestedNames.add(basename);
+    else requestedStems.add(basename);
+  }
+  return {
+    requestedRelative,
+    requestedNames,
+    requestedStems,
+    byRelative: new Map(),
+    byName: new Map(),
+    byStem: new Map()
+  };
+}
+
+async function indexMedia(folder, lookup, relativePrefix = "") {
+  const entries = await folder.getEntries();
+  for (const entry of entries) {
+    const relativePath = relativePrefix ? `${relativePrefix}/${entry.name}` : entry.name;
+    if (entry.isFolder) await indexMedia(entry, lookup, relativePath);
+    else {
+      const extension = entry.name.includes(".") ? entry.name.split(".").pop().toLowerCase() : "";
+      if (MEDIA_EXTENSIONS.has(extension)) {
+        const stem = entry.name.slice(0, -(extension.length + 1));
+        const relativeKey = foldPath(relativePath);
+        const nameKey = foldPath(entry.name);
+        const stemKey = foldPath(stem);
+        const matchesRelative = lookup.requestedRelative.has(relativeKey);
+        const matchesName = lookup.requestedNames.has(nameKey);
+        const matchesStem = lookup.requestedStems.has(stemKey);
+        if (!matchesRelative && !matchesName && !matchesStem) continue;
+        const record = {
+          name: entry.name,
+          stem,
+          relativePath,
+          nativePath: localFileSystem.getNativePath(entry)
+        };
+        if (matchesRelative) {
+          appendLookup(lookup.byRelative, relativeKey, record);
+        }
+        if (matchesName) {
+          appendLookup(lookup.byName, nameKey, record);
+        }
+        if (matchesStem) {
+          appendLookup(lookup.byStem, stemKey, record);
+        }
+      }
+    }
+  }
+  return lookup;
+}
+
+function resolveMedia(rows, lookup) {
   return rows.map(row => {
-    const requested = folded(row.fileName);
+    const requested = foldPath(row.fileName);
     const hasExtension = /\.[^/]+$/.test(requested);
-    let candidates = mediaFiles.filter(file => folded(file.relativePath) === requested);
+    let candidates = lookup.byRelative.get(requested) || [];
     if (!candidates.length) {
-      candidates = mediaFiles.filter(file =>
-        hasExtension ? folded(file.name) === requested.split("/").pop() : folded(file.stem) === requested.split("/").pop()
-      );
+      const basename = requested.split("/").pop();
+      candidates = (hasExtension ? lookup.byName : lookup.byStem).get(basename) || [];
     }
     if (!candidates.length) throw new Error(`${row.sourceRow}행: 미디어를 찾을 수 없습니다: ${row.fileName}`);
     if (candidates.length > 1) {
@@ -144,8 +350,7 @@ function resolveMedia(rows, mediaFiles) {
 }
 
 function samePath(left, right) {
-  const normalize = value => String(value).replace(/\\/g, "/").toLocaleLowerCase();
-  return normalize(left) === normalize(right);
+  return foldPath(left) === foldPath(right);
 }
 
 async function findProjectItem(mediaPath) {
@@ -242,10 +447,12 @@ async function trimPlacedItems(project, sequence, row, projectItem, audioTrackIn
 }
 
 async function buildTimeline() {
-  if (!selectedCsv || !selectedMediaFolder) throw new Error("CSV와 미디어 폴더를 먼저 선택하세요.");
-  setStatus("working", "CSV와 미디어 파일을 확인 중…");
-  const rows = parseStoryboard(await selectedCsv.read());
-  const resolvedRows = resolveMedia(rows, await indexMedia(selectedMediaFolder));
+  if (!selectedStoryboard || !selectedMediaFolder) throw new Error("스토리보드 파일과 미디어 폴더를 먼저 선택하세요.");
+  setStatus("working", "스토리보드와 미디어 파일을 확인 중…");
+  const rows = await parseStoryboardFile(selectedStoryboard);
+  const mediaLookup = createMediaLookup(rows);
+  await indexMedia(selectedMediaFolder, mediaLookup);
+  const resolvedRows = resolveMedia(rows, mediaLookup);
 
   const project = await ppro.Project.getActiveProject();
   if (!project) throw new Error("열린 Premiere 프로젝트가 없습니다.");
@@ -261,19 +468,37 @@ async function buildTimeline() {
 
   const binName = document.getElementById("bin-name").value.trim() || "Storyboard Media";
   const targetBin = await getOrCreateBin(project, binName);
-  const projectItems = [];
-  let imported = 0;
+  const projectItemByPath = new Map();
+  const missing = [];
+  const pendingKeys = new Set();
   for (const row of resolvedRows) {
-    let item = await findProjectItem(row.mediaPath);
-    if (!item) {
-      const ok = await project.importFiles([row.mediaPath], true, ppro.ProjectItem.cast(targetBin), false);
-      if (!ok) throw new Error(`${row.sourceRow}행: 임포트 실패: ${row.mediaPath}`);
-      imported += 1;
-      item = await findProjectItem(row.mediaPath);
-      if (!item) throw new Error(`${row.sourceRow}행: 임포트한 프로젝트 항목을 찾지 못했습니다.`);
+    const key = foldPath(row.mediaPath);
+    if (projectItemByPath.has(key) || pendingKeys.has(key)) continue;
+    const item = await findProjectItem(row.mediaPath);
+    if (item) projectItemByPath.set(key, item);
+    else {
+      pendingKeys.add(key);
+      missing.push({ key, mediaPath: row.mediaPath, sourceRow: row.sourceRow });
     }
-    projectItems.push(item);
   }
+
+  let imported = 0;
+  if (missing.length) {
+    const ok = await project.importFiles(
+      missing.map(candidate => candidate.mediaPath),
+      true,
+      ppro.ProjectItem.cast(targetBin),
+      false
+    );
+    if (!ok) throw new Error(`${missing.length}개 미디어의 일괄 임포트에 실패했습니다.`);
+    imported = missing.length;
+    for (const candidate of missing) {
+      const item = await findProjectItem(candidate.mediaPath);
+      if (!item) throw new Error(`${candidate.sourceRow}행: 임포트한 프로젝트 항목을 찾지 못했습니다.`);
+      projectItemByPath.set(candidate.key, item);
+    }
+  }
+  const projectItems = resolvedRows.map(row => projectItemByPath.get(foldPath(row.mediaPath)));
 
   setStatus("working", "Premiere 타임라인에 배치 중…");
   const editor = ppro.SequenceEditor.getEditor(sequence);
@@ -303,14 +528,18 @@ async function buildTimeline() {
 }
 
 window.addEventListener("load", () => {
-  document.getElementById("pick-csv").addEventListener("click", async () => {
-    selectedCsv = await localFileSystem.getFileForOpening({ types: ["csv"] });
-    if (selectedCsv) document.getElementById("csv-path").value = selectedCsv.nativePath;
+  document.getElementById("pick-storyboard").addEventListener("click", async () => {
+    selectedStoryboard = await localFileSystem.getFileForOpening({ types: ["csv", "xlsx"] });
+    if (selectedStoryboard) {
+      document.getElementById("storyboard-path").value = localFileSystem.getNativePath(selectedStoryboard);
+    }
   });
 
   document.getElementById("pick-media").addEventListener("click", async () => {
     selectedMediaFolder = await localFileSystem.getFolder();
-    if (selectedMediaFolder) document.getElementById("media-root").value = selectedMediaFolder.nativePath;
+    if (selectedMediaFolder) {
+      document.getElementById("media-root").value = localFileSystem.getNativePath(selectedMediaFolder);
+    }
   });
 
   document.getElementById("build").addEventListener("click", async event => {
@@ -326,3 +555,16 @@ window.addEventListener("load", () => {
     }
   });
 });
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    assignLegacyTracks,
+    createMediaLookup,
+    indexMedia,
+    parseCsvStoryboard,
+    parseLegacyMatrix,
+    parseNormalizedMatrix,
+    parseXlsxStoryboard,
+    resolveMedia
+  };
+}

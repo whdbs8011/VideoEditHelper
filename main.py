@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Sequence
 
 from config import BuildConfig, DEFAULT_BIN_NAME, DEFAULT_JSX_NAME
-from csv_parser import StoryboardValidationError, parse_storyboard, resolve_media_files
+from csv_parser import (
+    StoryboardValidationError,
+    parse_storyboard_file,
+    resolve_media_files,
+)
 from premiere_builder import PremiereBuildError, execute_jsx, write_jsx
 
 LOGGER = logging.getLogger(__name__)
@@ -19,9 +23,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     """Create the CLI parser."""
 
     parser = argparse.ArgumentParser(
-        description="Import CSV storyboard media and arrange it in Premiere Pro."
+        description="Import CSV/XLSX storyboard media and arrange it in Premiere Pro."
     )
-    parser.add_argument("csv", type=Path, help="Storyboard CSV path")
+    parser.add_argument("storyboard", type=Path, help="Storyboard CSV or XLSX path")
     parser.add_argument("--media-root", required=True, type=Path, help="Media root folder")
     parser.add_argument("--project", required=True, type=Path, help="Target .prproj file")
     parser.add_argument(
@@ -64,10 +68,10 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     try:
         project_path = _validate_project(args.project)
-        storyboard = parse_storyboard(args.csv)
+        storyboard = parse_storyboard_file(args.storyboard)
         resolved_items = resolve_media_files(storyboard, args.media_root)
         config = BuildConfig(
-            csv_path=args.csv.expanduser().resolve(),
+            storyboard_path=args.storyboard.expanduser().resolve(),
             media_root=args.media_root.expanduser().resolve(),
             project_path=project_path,
             sequence_name=args.sequence,
