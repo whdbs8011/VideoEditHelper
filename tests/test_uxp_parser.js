@@ -9,7 +9,9 @@ global.document = { getElementById() { return null; } };
 
 const originalLoad = Module._load;
 Module._load = function loadMock(request, parent, isMain) {
-  if (request === "premierepro") return {};
+  if (request === "premierepro") {
+    return { TickTime: { createWithSeconds(seconds) { return { seconds }; } } };
+  }
   if (request === "uxp") {
     return { storage: { localFileSystem: {}, formats: {} } };
   }
@@ -43,4 +45,37 @@ XLSX.utils.book_append_sheet(workbook, sheet, "Storyboard");
 const bytes = XLSX.write(workbook, { type: "array", bookType: "xlsx" });
 assertInvalidDurationsFallBack(plugin.parseXlsxStoryboard(bytes));
 
-console.log("UXP parser duration fallback tests passed");
+let action;
+const mockProject = {
+  lockedAccess(callback) { callback(); },
+  executeTransaction(callback) {
+    callback({ addAction(value) { action = value; } });
+    return action.audioTrackIndex === -1;
+  }
+};
+const mockEditor = {
+  createOverwriteItemAction(projectItem, start, videoTrackIndex, audioTrackIndex) {
+    return { projectItem, start, videoTrackIndex, audioTrackIndex };
+  }
+};
+const failedAudioPlacement = plugin.placeOverwriteItem(
+  mockProject,
+  mockEditor,
+  { id: "clip" },
+  12,
+  0,
+  0
+);
+assert.strictEqual(failedAudioPlacement.success, false);
+assert.match(failedAudioPlacement.failure, /false/);
+const videoOnlyPlacement = plugin.placeOverwriteItem(
+  mockProject,
+  mockEditor,
+  { id: "clip" },
+  12,
+  0,
+  -1
+);
+assert.strictEqual(videoOnlyPlacement.success, true);
+
+console.log("UXP parser and placement fallback tests passed");

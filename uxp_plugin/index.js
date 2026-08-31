@@ -420,6 +420,10 @@ function samePath(left, right) {
   return foldPath(left) === foldPath(right);
 }
 
+function errorMessage(error) {
+  return error && error.message ? error.message : String(error || "unknown error");
+}
+
 async function findProjectItem(mediaPath) {
   const matches = await ppro.ClipProjectItem.findItemsMatchingMediaPath(mediaPath, true);
   for (const match of matches) {
@@ -489,15 +493,38 @@ async function selectSequence(project, requestedName) {
 }
 
 async function findPlacedTrackItem(track, projectItem, start) {
-  const wantedId = projectItem.getId();
+  const wantedId = await projectItem.getId();
   const items = track.getTrackItems(ppro.Constants.TrackItemType.CLIP, false);
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const itemStart = await items[index].getStartTime();
     if (Math.abs(itemStart.seconds - start) > 0.02) continue;
     const source = await items[index].getProjectItem();
-    if (source.getId() === wantedId) return items[index];
+    if (await source.getId() === wantedId) return items[index];
   }
   return null;
+}
+
+function placeOverwriteItem(project, editor, projectItem, start, videoTrackIndex, audioTrackIndex) {
+  let success = false;
+  let failure = "";
+  try {
+    project.lockedAccess(() => {
+      success = project.executeTransaction(compound => {
+        const action = editor.createOverwriteItemAction(
+          projectItem,
+          ppro.TickTime.createWithSeconds(start),
+          videoTrackIndex,
+          audioTrackIndex
+        );
+        compound.addAction(action);
+      }, "Place storyboard clip");
+    });
+    if (!success) failure = "Premiere 트랜잭션이 false를 반환했습니다.";
+  } catch (error) {
+    failure = errorMessage(error);
+    console.error(`Timeline placement failed at V${videoTrackIndex + 1}`, error);
+  }
+  return { success, failure };
 }
 
 async function trimPlacedItems(project, sequence, row, projectItem, audioTrackIndex) {
@@ -672,24 +699,37 @@ async function buildTimeline() {
         `${index}/${timelineRows.length}`
       );
     }
-    const audioTrackIndex = placeAudio && audioTrackCount > 0 ? Math.min(row.track, audioTrackCount - 1) : -1;
-    let success = false;
-    try {
-      project.lockedAccess(() => {
-        success = project.executeTransaction(compound => {
-          compound.addAction(editor.createOverwriteItemAction(
-            projectItem,
-            ppro.TickTime.createWithSeconds(row.start),
-            row.track,
-            audioTrackIndex
-          ));
-        }, "Place storyboard clip");
-      });
-    } catch (error) {
-      console.error(`Placement failed for row ${row.sourceRow}`, error);
+    let audioTrackIndex = placeAudio && audioTrackCount > 0
+      ? Math.min(row.track, audioTrackCount - 1)
+      : -1;
+    let placement = placeOverwriteItem(
+      project,
+      editor,
+      projectItem,
+      row.start,
+      row.track,
+      audioTrackIndex
+    );
+    if (!placement.success && audioTrackIndex >= 0) {
+      const videoOnly = placeOverwriteItem(
+        project,
+        editor,
+        projectItem,
+        row.start,
+        row.track,
+        -1
+      );
+      if (videoOnly.success) {
+        placement = videoOnly;
+        audioTrackIndex = -1;
+        warnings.push(`${row.sourceRow}행 경고: 오디오 없이 비디오만 배치`);
+      }
     }
-    if (!success) {
-      warnings.push(`${row.sourceRow}행 건너뜀: 타임라인 배치 실패`);
+    if (!placement.success) {
+      warnings.push(
+        `${row.sourceRow}행 건너뜀: V${row.track + 1} 타임라인 배치 실패 ` +
+        `(${placement.failure})`
+      );
       continue;
     }
     try {
@@ -762,6 +802,7 @@ if (typeof module !== "undefined" && module.exports) {
     assignLegacyTracks,
     createMediaLookup,
     indexMedia,
+    placeOverwriteItem,
     parseCsvStoryboard,
     parseLegacyMatrix,
     parseNormalizedMatrix,
