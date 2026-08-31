@@ -65,6 +65,22 @@ function parseTime(value, fieldName, rowNumber) {
   return seconds;
 }
 
+function parseOptionalDuration(value, rowNumber) {
+  const text = String(value === null || value === undefined ? "" : value).trim();
+  if (!text) return { duration: null, warning: null };
+  try {
+    const duration = parseTime(value, "duration", rowNumber);
+    if (duration <= 0) throw new Error("duration must be greater than zero");
+    return { duration, warning: null };
+  } catch (error) {
+    console.warn(`Invalid optional duration at row ${rowNumber}: ${text}`);
+    return {
+      duration: null,
+      warning: `${rowNumber}행 경고: duration 형식을 읽지 못해 원본 길이 유지 (${text})`
+    };
+  }
+}
+
 function validateMediaRequest(value, rowNumber) {
   const fileName = String(value ?? "").trim();
   if (!fileName) throw new Error(`${rowNumber}행: file_name 값이 비어 있습니다.`);
@@ -88,9 +104,7 @@ function parseCsvStoryboard(text) {
     const source = Object.fromEntries(headers.map((header, column) => [header, records[index][column] || ""]));
     const rowNumber = index + 1;
     const fileName = validateMediaRequest(source.file_name, rowNumber);
-    const durationText = (source.duration || "").trim();
-    const duration = durationText ? parseTime(durationText, "duration", rowNumber) : null;
-    if (duration === 0) throw new Error(`${rowNumber}행: duration은 0보다 커야 합니다.`);
+    const durationResult = parseOptionalDuration(source.duration, rowNumber);
     const trackText = (source.track_index || "").trim();
     const trackIndex = trackText ? Number(trackText) : 1;
     if (!Number.isInteger(trackIndex) || trackIndex < 1) {
@@ -99,9 +113,10 @@ function parseCsvStoryboard(text) {
     rows.push({
       fileName,
       start: parseTime(source.start_time, "start_time", rowNumber),
-      duration,
+      duration: durationResult.duration,
       track: trackIndex - 1,
-      sourceRow: rowNumber
+      sourceRow: rowNumber,
+      parseWarnings: durationResult.warning ? [durationResult.warning] : []
     });
   }
   if (!rows.length) throw new Error("CSV에 데이터 행이 없습니다.");
@@ -132,10 +147,7 @@ function parseNormalizedMatrix(records, headerIndex, headers) {
     const rowNumber = index + 1;
     const get = name => headers.has(name) ? record[headers.get(name)] : "";
     const fileName = validateMediaRequest(get("file_name"), rowNumber);
-    const durationValue = get("duration");
-    const durationText = String(durationValue ?? "").trim();
-    const duration = durationText ? parseTime(durationValue, "duration", rowNumber) : null;
-    if (duration === 0) throw new Error(`${rowNumber}행: duration은 0보다 커야 합니다.`);
+    const durationResult = parseOptionalDuration(get("duration"), rowNumber);
     const trackValue = get("track_index");
     const trackText = String(trackValue ?? "").trim();
     const trackIndex = trackText ? Number(trackValue) : 1;
@@ -145,9 +157,10 @@ function parseNormalizedMatrix(records, headerIndex, headers) {
     rows.push({
       fileName,
       start: parseTime(get("start_time"), "start_time", rowNumber),
-      duration,
+      duration: durationResult.duration,
       track: trackIndex - 1,
-      sourceRow: rowNumber
+      sourceRow: rowNumber,
+      parseWarnings: durationResult.warning ? [durationResult.warning] : []
     });
   }
   return rows;
@@ -196,20 +209,25 @@ function parseLegacyMatrix(records, headerIndex, headers) {
     const start = parseLegacyTime(record[startColumn], "start_time", rowNumber);
     const durationValue = durationColumn === undefined ? "" : record[durationColumn];
     let duration = null;
+    const parseWarnings = [];
     if (durationValue !== "" && durationValue !== null && durationValue !== undefined) {
-      duration = parseTime(durationValue, "duration", rowNumber);
+      const durationResult = parseOptionalDuration(durationValue, rowNumber);
+      duration = durationResult.duration;
+      if (durationResult.warning) parseWarnings.push(durationResult.warning);
     } else if (endColumn !== undefined) {
       duration = parseLegacyTime(record[endColumn], "end_time", rowNumber) - start;
-    }
-    if (duration !== null && duration <= 0) {
-      throw new Error(`${rowNumber}행: duration은 0보다 커야 합니다.`);
+      if (duration <= 0) {
+        parseWarnings.push(`${rowNumber}행 경고: 종료 시간이 시작 시간보다 늦지 않아 원본 길이 유지`);
+        duration = null;
+      }
     }
     rows.push({
       fileName,
       start,
       duration,
       track: 0,
-      sourceRow: rowNumber
+      sourceRow: rowNumber,
+      parseWarnings
     });
   }
   return assignLegacyTracks(rows);
@@ -519,7 +537,9 @@ async function buildTimeline() {
   }, scanStats);
   const resolution = resolveMedia(rows, mediaLookup);
   let resolvedRows = resolution.resolvedRows;
-  const warnings = [...resolution.warnings];
+  const warnings = [];
+  for (const row of rows) warnings.push(...(row.parseWarnings || []));
+  warnings.push(...resolution.warnings);
   if (scanStats.unreadableFolders.length) {
     warnings.push(
       `읽지 못한 미디어 폴더 ${scanStats.unreadableFolders.length}개를 건너뜀`
@@ -745,6 +765,7 @@ if (typeof module !== "undefined" && module.exports) {
     parseCsvStoryboard,
     parseLegacyMatrix,
     parseNormalizedMatrix,
+    parseOptionalDuration,
     parseXlsxStoryboard,
     resolveMedia
   };
