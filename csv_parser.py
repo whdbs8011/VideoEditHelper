@@ -521,6 +521,7 @@ def resolve_media_files(
     }
     by_name: dict[str, list[Path]] = defaultdict(list)
     by_stem: dict[str, list[Path]] = defaultdict(list)
+    by_take: dict[str, list[tuple[int, Path]]] = defaultdict(list)
     for candidate in root.rglob("*"):
         if not candidate.is_file() or candidate.suffix.casefold() not in SUPPORTED_MEDIA_EXTENSIONS:
             continue
@@ -530,6 +531,9 @@ def resolve_media_files(
             by_name[name].append(candidate.resolve())
         if stem in requested_stems:
             by_stem[stem].append(candidate.resolve())
+        base, separator, take_text = stem.rpartition("-")
+        if separator and base in requested_stems and take_text.isdigit():
+            by_take[base].append((int(take_text), candidate.resolve()))
 
     resolved: list[ResolvedStoryboardItem] = []
     errors: list[str] = []
@@ -550,6 +554,26 @@ def resolve_media_files(
             candidates = sorted(
                 lookup.get(key, []), key=lambda path: path.as_posix().casefold()
             )
+
+        if not candidates and not requested.suffix:
+            take_matches = by_take.get(requested.stem.casefold(), [])
+            if take_matches:
+                highest_take = max(take for take, _path in take_matches)
+                candidates = sorted(
+                    (
+                        path
+                        for take, path in take_matches
+                        if take == highest_take
+                    ),
+                    key=lambda path: path.as_posix().casefold(),
+                )
+                if len(candidates) == 1:
+                    LOGGER.info(
+                        "Row %d: exact media %r not found; using take %s",
+                        item.source_row,
+                        item.file_name,
+                        candidates[0].name,
+                    )
 
         if not candidates:
             errors.append(f"Row {item.source_row}: media not found: {item.file_name}")

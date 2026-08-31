@@ -291,16 +291,28 @@ function createMediaLookup(rows) {
     requestedStems,
     byRelative: new Map(),
     byName: new Map(),
-    byStem: new Map()
+    byStem: new Map(),
+    byTake: new Map()
   };
 }
 
-async function indexMedia(folder, lookup, relativePrefix = "") {
+async function indexMedia(
+  folder,
+  lookup,
+  relativePrefix = "",
+  onProgress = null,
+  stats = { folders: 0, files: 0 }
+) {
+  stats.folders += 1;
   const entries = await folder.getEntries();
   for (const entry of entries) {
     const relativePath = relativePrefix ? `${relativePrefix}/${entry.name}` : entry.name;
-    if (entry.isFolder) await indexMedia(entry, lookup, relativePath);
+    if (entry.isFolder) {
+      await indexMedia(entry, lookup, relativePath, onProgress, stats);
+    }
     else {
+      stats.files += 1;
+      if (onProgress && stats.files % 250 === 0) onProgress(stats);
       const extension = entry.name.includes(".") ? entry.name.split(".").pop().toLowerCase() : "";
       if (MEDIA_EXTENSIONS.has(extension)) {
         const stem = entry.name.slice(0, -(extension.length + 1));
@@ -310,7 +322,9 @@ async function indexMedia(folder, lookup, relativePrefix = "") {
         const matchesRelative = lookup.requestedRelative.has(relativeKey);
         const matchesName = lookup.requestedNames.has(nameKey);
         const matchesStem = lookup.requestedStems.has(stemKey);
-        if (!matchesRelative && !matchesName && !matchesStem) continue;
+        const takeMatch = /^(.*)-(\d+)$/.exec(stemKey);
+        const matchesTake = takeMatch && lookup.requestedStems.has(takeMatch[1]);
+        if (!matchesRelative && !matchesName && !matchesStem && !matchesTake) continue;
         const record = {
           name: entry.name,
           stem,
@@ -326,9 +340,16 @@ async function indexMedia(folder, lookup, relativePrefix = "") {
         if (matchesStem) {
           appendLookup(lookup.byStem, stemKey, record);
         }
+        if (matchesTake) {
+          appendLookup(lookup.byTake, takeMatch[1], {
+            record,
+            take: Number(takeMatch[2])
+          });
+        }
       }
     }
   }
+  if (!relativePrefix && onProgress) onProgress(stats);
   return lookup;
 }
 
@@ -341,11 +362,31 @@ function resolveMedia(rows, lookup) {
       const basename = requested.split("/").pop();
       candidates = (hasExtension ? lookup.byName : lookup.byStem).get(basename) || [];
     }
+    let usedTakeFallback = false;
+    if (!candidates.length && !hasExtension) {
+      const basename = requested.split("/").pop();
+      const takeMatches = lookup.byTake.get(basename) || [];
+      if (takeMatches.length) {
+        const highestTake = takeMatches.reduce(
+          (highest, candidate) => Math.max(highest, candidate.take),
+          -1
+        );
+        candidates = takeMatches
+          .filter(candidate => candidate.take === highestTake)
+          .map(candidate => candidate.record);
+        usedTakeFallback = true;
+      }
+    }
     if (!candidates.length) throw new Error(`${row.sourceRow}행: 미디어를 찾을 수 없습니다: ${row.fileName}`);
     if (candidates.length > 1) {
       throw new Error(`${row.sourceRow}행: 같은 이름의 미디어가 여러 개입니다. 상대 경로를 쓰세요: ${row.fileName}`);
     }
-    return { ...row, mediaPath: candidates[0].nativePath };
+    return {
+      ...row,
+      mediaPath: candidates[0].nativePath,
+      usedTakeFallback,
+      resolvedMediaName: candidates[0].name
+    };
   });
 }
 
@@ -451,8 +492,22 @@ async function buildTimeline() {
   setStatus("working", "스토리보드와 미디어 파일을 확인 중…");
   const rows = await parseStoryboardFile(selectedStoryboard);
   const mediaLookup = createMediaLookup(rows);
-  await indexMedia(selectedMediaFolder, mediaLookup);
+  await indexMedia(selectedMediaFolder, mediaLookup, "", stats => {
+    setStatus(
+      "working",
+      "미디어 폴더를 검색 중…",
+      `${stats.folders}개 폴더 / ${stats.files}개 파일 확인`
+    );
+  });
   const resolvedRows = resolveMedia(rows, mediaLookup);
+  const takeFallbackCount = resolvedRows.filter(row => row.usedTakeFallback).length;
+  if (takeFallbackCount) {
+    setStatus(
+      "working",
+      "대체 테이크를 선택했습니다.",
+      `정확한 파일이 없던 ${takeFallbackCount}개 컷에서 가장 높은 테이크 사용`
+    );
+  }
 
   const project = await ppro.Project.getActiveProject();
   if (!project) throw new Error("열린 Premiere 프로젝트가 없습니다.");
@@ -471,7 +526,15 @@ async function buildTimeline() {
   const projectItemByPath = new Map();
   const missing = [];
   const pendingKeys = new Set();
-  for (const row of resolvedRows) {
+  for (let index = 0; index < resolvedRows.length; index += 1) {
+    const row = resolvedRows[index];
+    if (index % 10 === 0) {
+      setStatus(
+        "working",
+        "Premiere 프로젝트의 미디어를 확인 중…",
+        `${index}/${resolvedRows.length}`
+      );
+    }
     const key = foldPath(row.mediaPath);
     if (projectItemByPath.has(key) || pendingKeys.has(key)) continue;
     const item = await findProjectItem(row.mediaPath);
@@ -484,6 +547,7 @@ async function buildTimeline() {
 
   let imported = 0;
   if (missing.length) {
+    setStatus("working", "새 미디어를 Premiere에 임포트 중…", `${missing.length}개 파일`);
     const ok = await project.importFiles(
       missing.map(candidate => candidate.mediaPath),
       true,
@@ -505,6 +569,13 @@ async function buildTimeline() {
   const placeAudio = document.getElementById("place-audio").checked;
   for (let index = 0; index < resolvedRows.length; index += 1) {
     const row = resolvedRows[index];
+    if (index % 5 === 0) {
+      setStatus(
+        "working",
+        "Premiere 타임라인에 배치 중…",
+        `${index}/${resolvedRows.length}`
+      );
+    }
     const audioTrackIndex = placeAudio && audioTrackCount > 0 ? Math.min(row.track, audioTrackCount - 1) : -1;
     let success = false;
     project.lockedAccess(() => {
@@ -524,7 +595,12 @@ async function buildTimeline() {
   if (document.getElementById("save-project").checked && !(await project.save())) {
     throw new Error("타임라인은 생성했지만 프로젝트 저장에 실패했습니다.");
   }
-  return { placed: resolvedRows.length, imported, sequence: sequence.name };
+  return {
+    placed: resolvedRows.length,
+    imported,
+    sequence: sequence.name,
+    takeFallbacks: takeFallbackCount
+  };
 }
 
 window.addEventListener("load", () => {
@@ -542,16 +618,26 @@ window.addEventListener("load", () => {
     }
   });
 
-  document.getElementById("build").addEventListener("click", async event => {
-    event.currentTarget.disabled = true;
+  const buildButton = document.getElementById("build");
+  buildButton.addEventListener("click", async () => {
+    buildButton.disabled = true;
+    setStatus("working", "작업을 시작하는 중…");
+    await new Promise(resolve => setTimeout(resolve, 0));
     try {
       const result = await buildTimeline();
-      setStatus("success", `완료: ${result.placed}개 배치, ${result.imported}개 임포트`, `시퀀스: ${result.sequence}`);
+      const takeDetails = result.takeFallbacks
+        ? ` / 대체 테이크 ${result.takeFallbacks}개`
+        : "";
+      setStatus(
+        "success",
+        `완료: ${result.placed}개 배치, ${result.imported}개 임포트`,
+        `시퀀스: ${result.sequence}${takeDetails}`
+      );
     } catch (error) {
       console.error(error);
       setStatus("error", "실행 실패", error && error.message ? error.message : String(error));
     } finally {
-      event.currentTarget.disabled = false;
+      buildButton.disabled = false;
     }
   });
 });

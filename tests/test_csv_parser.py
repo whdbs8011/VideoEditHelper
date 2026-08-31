@@ -74,6 +74,34 @@ class CsvParserTests(unittest.TestCase):
             with self.assertRaisesRegex(StoryboardValidationError, "ambiguous media"):
                 resolve_media_files(parse_storyboard(csv_path), media_root)
 
+    def test_resolve_media_uses_highest_take_only_when_exact_is_missing(self) -> None:
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            media_root = tmp_path / "media"
+            media_root.mkdir()
+            (media_root / "24-1.mp4").touch()
+            (media_root / "24-2.mp4").touch()
+            csv_path = tmp_path / "storyboard.csv"
+            csv_path.write_text("file_name,start_time\n24,0\n", encoding="utf-8")
+
+            [resolved] = resolve_media_files(parse_storyboard(csv_path), media_root)
+
+        self.assertEqual(resolved.media_path.name, "24-2.mp4")
+
+    def test_resolve_media_prefers_exact_stem_over_numbered_takes(self) -> None:
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            media_root = tmp_path / "media"
+            media_root.mkdir()
+            (media_root / "24.mp4").touch()
+            (media_root / "24-9.mp4").touch()
+            csv_path = tmp_path / "storyboard.csv"
+            csv_path.write_text("file_name,start_time\n24,0\n", encoding="utf-8")
+
+            [resolved] = resolve_media_files(parse_storyboard(csv_path), media_root)
+
+        self.assertEqual(resolved.media_path.name, "24.mp4")
+
 
 if __name__ == "__main__":
     unittest.main()
