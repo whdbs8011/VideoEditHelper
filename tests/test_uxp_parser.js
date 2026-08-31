@@ -7,10 +7,23 @@ const XLSX = require("../uxp_plugin/vendor/xlsx.full.min.js");
 global.window = { addEventListener() {}, XLSX };
 global.document = { getElementById() { return null; } };
 
+const mediaPathMatches = new Map();
+const premiereMock = {
+  TickTime: { createWithSeconds(seconds) { return { seconds }; } },
+  ClipProjectItem: {
+    async findItemsMatchingMediaPath(term) {
+      return mediaPathMatches.get(term) || [];
+    },
+    cast(item) {
+      if (!item || !item.mediaPath) throw new Error("Not a clip item");
+      return item;
+    }
+  }
+};
 const originalLoad = Module._load;
 Module._load = function loadMock(request, parent, isMain) {
   if (request === "premierepro") {
-    return { TickTime: { createWithSeconds(seconds) { return { seconds }; } } };
+    return premiereMock;
   }
   if (request === "uxp") {
     return { storage: { localFileSystem: {}, formats: {} } };
@@ -78,4 +91,26 @@ const videoOnlyPlacement = plugin.placeOverwriteItem(
 );
 assert.strictEqual(videoOnlyPlacement.success, true);
 
-console.log("UXP parser and placement fallback tests passed");
+const importedClip = {
+  name: "1.mp4",
+  mediaPath: "premiere-canonical-path",
+  getId() { return "imported-1"; },
+  async getMediaFilePath() { return this.mediaPath; }
+};
+mediaPathMatches.set("1.mp4", [importedClip]);
+assert.deepStrictEqual(
+  plugin.mediaPathSearchTerms("C:\\Media\\1.mp4"),
+  ["C:\\Media\\1.mp4", "C:/Media/1.mp4", "1.mp4"]
+);
+async function verifyImportedBinFallback() {
+  const result = await plugin.findProjectItem("C:\\Media\\1.mp4", {
+    async getItems() { return [importedClip]; }
+  });
+  assert.strictEqual(result, importedClip);
+  console.log("UXP parser and placement fallback tests passed");
+}
+
+verifyImportedBinFallback().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

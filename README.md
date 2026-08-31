@@ -66,6 +66,24 @@ cd VideoEditHelper
 
 패널은 Python, Pymiere, 로컬 서버를 사용하지 않습니다. Premiere 25.6에 도입된 공식 비동기 DOM, undo 가능한 transaction, 권한 기반 파일 선택기만 사용합니다. 배포 시 UXP Developer Tool에서 `.ccx`로 패키징하면 Windows/macOS에서 설치할 수 있습니다.
 
+## UXP 디버깅 및 인수인계
+
+다른 Codex 작업자도 아래 순서로 재현하고 수정할 수 있습니다.
+
+1. UXP Developer Tool에서 플러그인을 **Reload**한 다음 Premiere 패널을 다시 엽니다. 수정한 로컬 파일은 Reload 전까지 반영되지 않습니다.
+2. 대상 시퀀스를 열고, CSV의 track_index에 맞는 비디오 트랙(V1, V2, V3…)이 실제로 있는지와 잠금 상태가 아닌지를 확인합니다.
+3. 패널의 완료 상세에 표시되는 N행 건너뜀 문구를 확인하고, UXP Developer Tool의 플러그인 콘솔에서 같은 시각의 오류를 확인합니다.
+4. 재현 시에는 작은 CSV(예: 1.mp4,0,3,1)와 미디어 루트의 실제 1.mp4 한 개로 먼저 시험합니다. 이 테스트가 성공한 뒤 원본 스토리보드를 사용합니다.
+
+패널의 미디어 처리 흐름은 다음과 같습니다.
+
+1. 선택한 미디어 루트에서 CSV/XLSX가 요청한 파일을 찾습니다.
+2. 이미 프로젝트에 있는 경우 그 클립을 재사용하고, 없으면 Storyboard Media 빈으로 임포트합니다.
+3. Premiere가 임포트 후 경로 표기를 변경해도, 임포트 빈 안의 유일한 같은 파일명 클립을 다시 찾아 타임라인 배치에 사용합니다.
+4. 각 행을 start_time의 절대 위치에 overwrite 배치합니다. 미디어가 없거나 후보가 모호한 행만 빈 구간으로 남습니다.
+
+수정 위치는 uxp_plugin/index.js 한 곳이며, CSV/XLSX 파서는 파일 상단, 미디어 해석은 indexMedia/resolveMedia, Premiere 임포트·배치는 buildTimeline에 있습니다. tests/test_uxp_parser.js에 경로 표기 차이와 오디오 없이 비디오만 배치하는 회귀 테스트가 있습니다.
+
 ## 2. Python CLI 사용
 
 Python 3.10 이상을 권장합니다.

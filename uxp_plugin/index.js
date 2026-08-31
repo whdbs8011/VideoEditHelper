@@ -279,7 +279,10 @@ async function parseStoryboardFile(file) {
 }
 
 function foldPath(value) {
-  return String(value).replace(/\\/g, "/").toLocaleLowerCase();
+  return String(value)
+    .normalize("NFC")
+    .replace(/\\/g, "/")
+    .toLocaleLowerCase();
 }
 
 function appendLookup(map, key, value) {
@@ -420,24 +423,50 @@ function samePath(left, right) {
   return foldPath(left) === foldPath(right);
 }
 
+function mediaPathSearchTerms(mediaPath) {
+  const nativePath = String(mediaPath);
+  const posixPath = nativePath.replace(/\\/g, "/");
+  const fileName = posixPath.split("/").pop();
+  return [...new Set([nativePath, posixPath, fileName].filter(Boolean))];
+}
+
 function errorMessage(error) {
   return error && error.message ? error.message : String(error || "unknown error");
 }
 
-async function findProjectItem(mediaPath) {
-  const matches = await ppro.ClipProjectItem.findItemsMatchingMediaPath(mediaPath, true);
-  for (const match of matches) {
+async function findMatchingClip(items, mediaPath, allowFileNameFallback = false) {
+  const expectedName = String(mediaPath).replace(/\\/g, "/").split("/").pop();
+  const nameMatches = [];
+  for (const match of items) {
     try {
       const clip = ppro.ClipProjectItem.cast(match);
       if (clip && samePath(await clip.getMediaFilePath(), mediaPath)) return match;
-    } catch (_) {}
+      if (allowFileNameFallback && clip && match.name === expectedName) nameMatches.push(match);
+    } catch (_) {
+      // Folder and sequence items cannot be cast to ClipProjectItem.
+    }
   }
-  return null;
+  return nameMatches.length === 1 ? nameMatches[0] : null;
 }
 
-async function findProjectItemSafely(mediaPath) {
+async function findProjectItem(mediaPath, importBin = null) {
+  for (const term of mediaPathSearchTerms(mediaPath)) {
+    const matches = await ppro.ClipProjectItem.findItemsMatchingMediaPath(term, true);
+    const exact = await findMatchingClip(matches, mediaPath);
+    if (exact) return exact;
+  }
+  if (!importBin) return null;
+
+  // Premiere may canonicalize a path (for example a volume or Unicode form)
+  // immediately after import. The import bin is controlled by this panel, so
+  // a single matching filename there is a safe fallback to its clip item.
+  const binItems = await importBin.getItems();
+  return findMatchingClip(binItems, mediaPath, true);
+}
+
+async function findProjectItemSafely(mediaPath, importBin = null) {
   try {
-    return await findProjectItem(mediaPath);
+    return await findProjectItem(mediaPath, importBin);
   } catch (error) {
     console.error(`Project item lookup failed: ${mediaPath}`, error);
     return null;
@@ -654,7 +683,7 @@ async function buildTimeline() {
       }
 
       for (const candidate of missing) {
-        let item = await findProjectItemSafely(candidate.mediaPath);
+        let item = await findProjectItemSafely(candidate.mediaPath, targetBin);
         if (!item) {
           try {
             const importedOne = await project.importFiles(
@@ -663,7 +692,7 @@ async function buildTimeline() {
               targetProjectItem,
               false
             );
-            if (importedOne) item = await findProjectItemSafely(candidate.mediaPath);
+            if (importedOne) item = await findProjectItemSafely(candidate.mediaPath, targetBin);
           } catch (error) {
             console.error(`Import failed: ${candidate.mediaPath}`, error);
           }
@@ -801,7 +830,9 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     assignLegacyTracks,
     createMediaLookup,
+    findProjectItem,
     indexMedia,
+    mediaPathSearchTerms,
     placeOverwriteItem,
     parseCsvStoryboard,
     parseLegacyMatrix,
