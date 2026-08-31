@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>Storyboard Builder</title>
+    <link rel="stylesheet" href="./style.css" />
+    <script src="./index.js"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <sp-heading size="L">Storyboard Builder</sp-heading>
+        <sp-body>CSV의 미디어를 현재 Premiere 시퀀스에 배치합니다.</sp-body>
+      </header>
+
+      <sp-field-label>스토리보드 CSV</sp-field-label>
+      <div class="path-row">
+        <sp-textfield id="csv-path" readonly placeholder="CSV 파일 선택"></sp-textfield>
+        <sp-button id="pick-csv" variant="secondary">선택</sp-button>
+      </div>
+
+      <sp-field-label>미디어 루트 폴더</sp-field-label>
+      <div class="path-row">
+        <sp-textfield id="media-root" readonly placeholder="미디어 폴더 선택"></sp-textfield>
+        <sp-button id="pick-media" variant="secondary">선택</sp-button>
+      </div>
+
+      <sp-field-label for="sequence-name">시퀀스 이름 (비우면 활성 시퀀스)</sp-field-label>
+      <sp-textfield id="sequence-name" placeholder="예: Main Sequence"></sp-textfield>
+
+      <sp-field-label for="bin-name">임포트 빈 이름</sp-field-label>
+      <sp-textfield id="bin-name" value="Storyboard Media"></sp-textfield>
+
+      <section class="options">
+        <sp-checkbox id="place-audio" checked>소스 오디오도 배치</sp-checkbox>
+        <sp-checkbox id="save-project" checked>완료 후 프로젝트 저장</sp-checkbox>
+      </section>
+
+      <sp-button id="build" variant="accent">타임라인 생성</sp-button>
+      <div id="status" class="status idle" role="status">준비</div>
+      <pre id="details"></pre>
+    </main>
+  </body>
+</html>

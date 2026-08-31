@@ -1,0 +1,10 @@
+[project]
+name = "premiere-storyboard-builder"
+version = "1.0.0"
+description = "Build Adobe Premiere Pro timelines from storyboard CSV files"
+requires-python = ">=3.10"
+dependencies = ["pymiere==1.4.1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

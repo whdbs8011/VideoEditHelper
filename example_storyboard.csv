@@ -1,0 +1,5 @@
+file_name,start_time,duration,track_index
+intro.mp4,0,5,1
+shots/scene_01.mov,00:00:05.000,8.5,1
+b_roll,00:00:13.500,4,2
+outro.mp4,00:00:17.500,,1
