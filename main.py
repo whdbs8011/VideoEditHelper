@@ -70,6 +70,12 @@ def run(argv: Sequence[str] | None = None) -> int:
         project_path = _validate_project(args.project)
         storyboard = parse_storyboard_file(args.storyboard)
         resolved_items = resolve_media_files(storyboard, args.media_root)
+        skipped_count = len(storyboard) - len(resolved_items)
+        if skipped_count:
+            LOGGER.warning(
+                "%d storyboard row(s) have no unambiguous media and will remain empty",
+                skipped_count,
+            )
         config = BuildConfig(
             storyboard_path=args.storyboard.expanduser().resolve(),
             media_root=args.media_root.expanduser().resolve(),
@@ -82,14 +88,20 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         jsx_path = write_jsx(config, resolved_items)
         if args.dry_run:
-            LOGGER.info("Dry run complete: %d row(s) validated", len(resolved_items))
+            LOGGER.info(
+                "Dry run complete: placed=%d skipped=%d",
+                len(resolved_items),
+                skipped_count,
+            )
             return 0
 
         result = execute_jsx(jsx_path)
+        total_skipped = skipped_count + result.skipped
         LOGGER.info(
-            "Completed: placed=%d imported=%d sequence=%s",
+            "Completed: placed=%d imported=%d skipped=%d sequence=%s",
             result.placed,
             result.imported,
+            total_skipped,
             result.sequence_name,
         )
         return 0

@@ -4,6 +4,7 @@
   --success: #70d69a;
   --error: #ff7378;
   --working: #f2cf66;
+  --warning: #f2cf66;
 }
 
 * { box-sizing: border-box; }
@@ -21,5 +22,6 @@ sp-textfield { width: 100%; }
 .status { margin-top: 13px; padding: 9px; border-radius: 5px; background: var(--surface); }
 .status.working { color: var(--working); }
 .status.success { color: var(--success); }
+.status.warning { color: var(--warning); }
 .status.error { color: var(--error); }
 pre { max-height: 160px; overflow: auto; margin: 8px 0 0; white-space: pre-wrap; color: var(--muted); font-size: 11px; }

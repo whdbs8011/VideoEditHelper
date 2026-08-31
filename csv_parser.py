@@ -17,7 +17,6 @@ from xml.etree import ElementTree
 from config import (
     ResolvedStoryboardItem,
     StoryboardItem,
-    SUPPORTED_MEDIA_EXTENSIONS,
     SUPPORTED_STORYBOARD_EXTENSIONS,
 )
 
@@ -36,6 +35,25 @@ _SheetRows: TypeAlias = list[tuple[int, dict[int, _CellValue]]]
 
 class StoryboardValidationError(ValueError):
     """Raised when the storyboard file or referenced media is invalid."""
+
+
+def _iter_files(root: Path) -> Iterable[Path]:
+    """Yield files without following directory symlinks or aborting on access errors."""
+
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            for entry in directory.iterdir():
+                try:
+                    if entry.is_dir() and not entry.is_symlink():
+                        pending.append(entry)
+                    elif entry.is_file():
+                        yield entry
+                except OSError as exc:
+                    LOGGER.warning("Skipping unreadable media entry %s: %s", entry, exc)
+        except OSError as exc:
+            LOGGER.warning("Skipping unreadable media folder %s: %s", directory, exc)
 
 
 def _normalise_header(value: object) -> str:
@@ -500,8 +518,8 @@ def resolve_media_files(
     """Resolve storyboard file names against ``media_root`` recursively.
 
     Names with extensions first try the exact relative path, then a basename
-    lookup. Extensionless names match by stem. Ambiguous and missing matches are
-    reported together.
+    lookup. Extensionless names match by stem. Missing or ambiguous rows are
+    logged and skipped so their absolute timeline positions remain empty.
     """
 
     root = media_root.expanduser().resolve()
@@ -522,9 +540,7 @@ def resolve_media_files(
     by_name: dict[str, list[Path]] = defaultdict(list)
     by_stem: dict[str, list[Path]] = defaultdict(list)
     by_take: dict[str, list[tuple[int, Path]]] = defaultdict(list)
-    for candidate in root.rglob("*"):
-        if not candidate.is_file() or candidate.suffix.casefold() not in SUPPORTED_MEDIA_EXTENSIONS:
-            continue
+    for candidate in _iter_files(root):
         name = candidate.name.casefold()
         stem = candidate.stem.casefold()
         if name in requested_names:
@@ -536,7 +552,7 @@ def resolve_media_files(
             by_take[base].append((int(take_text), candidate.resolve()))
 
     resolved: list[ResolvedStoryboardItem] = []
-    errors: list[str] = []
+    skipped_messages: list[str] = []
     for item in storyboard_items:
         requested = Path(item.file_name)
         exact = (root / requested).resolve()
@@ -576,13 +592,15 @@ def resolve_media_files(
                     )
 
         if not candidates:
-            errors.append(f"Row {item.source_row}: media not found: {item.file_name}")
+            skipped_messages.append(
+                f"Row {item.source_row} skipped: media not found: {item.file_name}"
+            )
             continue
         if len(candidates) > 1:
             choices = ", ".join(str(path.relative_to(root)) for path in candidates)
-            errors.append(
-                f"Row {item.source_row}: ambiguous media {item.file_name!r}; "
-                f"use a relative path. Candidates: {choices}"
+            skipped_messages.append(
+                f"Row {item.source_row} skipped: ambiguous media "
+                f"{item.file_name!r}. Candidates: {choices}"
             )
             continue
 
@@ -596,8 +614,11 @@ def resolve_media_files(
             )
         )
 
-    if errors:
-        raise StoryboardValidationError(
-            "Media resolution failed:\n- " + "\n- ".join(errors)
+    for message in skipped_messages[:20]:
+        LOGGER.warning("%s", message)
+    if len(skipped_messages) > 20:
+        LOGGER.warning(
+            "%d additional skipped media row(s) omitted from the log",
+            len(skipped_messages) - 20,
         )
     return resolved

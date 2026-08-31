@@ -7,23 +7,6 @@ from pathlib import Path
 from typing import Final
 
 
-SUPPORTED_MEDIA_EXTENSIONS: Final[frozenset[str]] = frozenset(
-    {
-        ".avi",
-        ".jpeg",
-        ".jpg",
-        ".m4v",
-        ".mkv",
-        ".mov",
-        ".mp4",
-        ".mxf",
-        ".png",
-        ".tif",
-        ".tiff",
-        ".wav",
-        ".webm",
-    }
-)
 DEFAULT_BIN_NAME: Final[str] = "Storyboard Media"
 DEFAULT_JSX_NAME: Final[str] = "storyboard_build.jsx"
 SUPPORTED_STORYBOARD_EXTENSIONS: Final[frozenset[str]] = frozenset({".csv", ".xlsx"})

@@ -22,6 +22,7 @@ class BuildResult:
 
     placed: int
     imported: int
+    skipped: int
     sequence_name: str
     jsx_path: Path
 
@@ -70,9 +71,6 @@ def generate_jsx(
 ) -> str:
     """Return a self-contained ExtendScript program for the given storyboard."""
 
-    if not items:
-        raise PremiereBuildError("Cannot generate JSX for an empty storyboard.")
-
     project_path = config.project_path.expanduser().resolve().as_posix()
     script = f"""(function () {{
     var projectPath = {_jsx_string(project_path)};
@@ -85,7 +83,9 @@ def generate_jsx(
     var isWindows = $.os.toLowerCase().indexOf("windows") >= 0;
     var importedCount = 0;
     var placedCount = 0;
+    var skippedCount = 0;
     var itemCache = {{}};
+    var targetBin = null;
 
     function normalizedPath(value) {{
         var result = String(value || "").split(slash).join("/");
@@ -113,13 +113,14 @@ def generate_jsx(
         return null;
     }}
 
-    function getOrImportItem(project, targetBin, row) {{
+    function getOrImportItem(project, row) {{
         var cacheKey = "$" + normalizedPath(row.path);
         if (Object.prototype.hasOwnProperty.call(itemCache, cacheKey)) {{
             return itemCache[cacheKey];
         }}
         var item = findItemByPath(project.rootItem, row.path);
         if (!item) {{
+            if (!targetBin) {{ targetBin = getOrCreateBin(project.rootItem, binName); }}
             if (!project.importFiles([row.path], true, targetBin, false)) {{
                 throw new Error("Import failed for storyboard row " + row.row + ": " + row.path);
             }}
@@ -182,36 +183,45 @@ def generate_jsx(
 
         var project = app.project;
         var sequence = getSequence(project, sequenceName);
-        var targetBin = getOrCreateBin(project.rootItem, binName);
 
         for (var r = 0; r < rows.length; r++) {{
             var row = rows[r];
             if (row.track < 0 || row.track >= sequence.videoTracks.numTracks) {{
-                throw new Error("Storyboard row " + row.row + ": video track " + (row.track + 1) +
-                    " does not exist in sequence " + sequence.name);
+                skippedCount++;
+                continue;
             }}
 
-            var item = getOrImportItem(project, targetBin, row);
-
-            var audioTrack = -1;
-            if (placeAudio && sequence.audioTracks.numTracks > 0) {{
-                audioTrack = Math.min(row.track, sequence.audioTracks.numTracks - 1);
-                sequence.overwriteClip(item, row.start, row.track, audioTrack);
-            }} else {{
-                var startTime = new Time();
-                startTime.seconds = row.start;
-                sequence.videoTracks[row.track].overwriteClip(item, startTime.ticks);
+            try {{
+                var item = getOrImportItem(project, row);
+                var audioTrack = -1;
+                if (placeAudio && sequence.audioTracks.numTracks > 0) {{
+                    audioTrack = Math.min(row.track, sequence.audioTracks.numTracks - 1);
+                    sequence.overwriteClip(item, row.start, row.track, audioTrack);
+                }} else {{
+                    var startTime = new Time();
+                    startTime.seconds = row.start;
+                    sequence.videoTracks[row.track].overwriteClip(item, startTime.ticks);
+                }}
+            }} catch (rowError) {{
+                skippedCount++;
+                $.writeln("Storyboard row " + row.row + " skipped: " + rowError);
+                continue;
             }}
 
-            trimMatchingClips(sequence.videoTracks[row.track], item, row.start, row.duration);
-            if (audioTrack >= 0) {{
-                trimMatchingClips(sequence.audioTracks[audioTrack], item, row.start, row.duration);
-            }}
             placedCount++;
+            try {{
+                trimMatchingClips(sequence.videoTracks[row.track], item, row.start, row.duration);
+                if (audioTrack >= 0) {{
+                    trimMatchingClips(sequence.audioTracks[audioTrack], item, row.start, row.duration);
+                }}
+            }} catch (trimError) {{
+                $.writeln("Storyboard row " + row.row + " trim warning: " + trimError);
+            }}
         }}
 
         if (saveProject) {{ project.save(); }}
-        return ["STORYBOARD_RESULT", "OK", placedCount, importedCount, sequence.name].join("|");
+        return ["STORYBOARD_RESULT", "OK", placedCount, importedCount, skippedCount,
+            sequence.name].join("|");
     }} catch (error) {{
         var message = String(error && error.message ? error.message : error);
         message = message.split("|").join("/");
@@ -266,11 +276,12 @@ def execute_jsx(jsx_path: Path) -> BuildResult:
         raise PremiereBuildError(f"Unexpected Premiere response: {text!r}")
     if parts[1] == "ERROR":
         raise PremiereBuildError(parts[2] if len(parts) > 2 else "Unknown JSX error")
-    if len(parts) < 5 or parts[1] != "OK":
+    if len(parts) < 6 or parts[1] != "OK":
         raise PremiereBuildError(f"Malformed Premiere response: {text!r}")
     return BuildResult(
         placed=int(parts[2]),
         imported=int(parts[3]),
-        sequence_name="|".join(parts[4:]),
+        skipped=int(parts[4]),
+        sequence_name="|".join(parts[5:]),
         jsx_path=path,
     )

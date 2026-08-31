@@ -62,7 +62,7 @@ class CsvParserTests(unittest.TestCase):
 
         self.assertEqual([item.media_path.name for item in resolved], ["scene.mov", "scene.mov"])
 
-    def test_resolve_media_rejects_ambiguous_stem(self) -> None:
+    def test_resolve_media_skips_ambiguous_stem(self) -> None:
         with TemporaryDirectory() as directory:
             tmp_path = Path(directory)
             media_root = tmp_path / "media"
@@ -71,8 +71,26 @@ class CsvParserTests(unittest.TestCase):
             (media_root / "same.mov").touch()
             csv_path = tmp_path / "storyboard.csv"
             csv_path.write_text("file_name,start_time\nsame,0\n", encoding="utf-8")
-            with self.assertRaisesRegex(StoryboardValidationError, "ambiguous media"):
-                resolve_media_files(parse_storyboard(csv_path), media_root)
+            resolved = resolve_media_files(parse_storyboard(csv_path), media_root)
+
+        self.assertEqual(resolved, [])
+
+    def test_resolve_media_skips_missing_file_and_keeps_other_absolute_times(self) -> None:
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            media_root = tmp_path / "media"
+            media_root.mkdir()
+            (media_root / "present.mp4").touch()
+            csv_path = tmp_path / "storyboard.csv"
+            csv_path.write_text(
+                "file_name,start_time,duration\nmissing,0,3\npresent,10,2\n",
+                encoding="utf-8",
+            )
+
+            [resolved] = resolve_media_files(parse_storyboard(csv_path), media_root)
+
+        self.assertEqual(resolved.media_path.name, "present.mp4")
+        self.assertEqual(resolved.start_time, 10.0)
 
     def test_resolve_media_uses_highest_take_only_when_exact_is_missing(self) -> None:
         with TemporaryDirectory() as directory:
@@ -101,6 +119,19 @@ class CsvParserTests(unittest.TestCase):
             [resolved] = resolve_media_files(parse_storyboard(csv_path), media_root)
 
         self.assertEqual(resolved.media_path.name, "24.mp4")
+
+    def test_resolve_media_does_not_reject_unlisted_premiere_extension(self) -> None:
+        with TemporaryDirectory() as directory:
+            tmp_path = Path(directory)
+            media_root = tmp_path / "media"
+            media_root.mkdir()
+            (media_root / "camera_clip.mts").touch()
+            csv_path = tmp_path / "storyboard.csv"
+            csv_path.write_text("file_name,start_time\ncamera_clip,0\n", encoding="utf-8")
+
+            [resolved] = resolve_media_files(parse_storyboard(csv_path), media_root)
+
+        self.assertEqual(resolved.media_path.name, "camera_clip.mts")
 
 
 if __name__ == "__main__":
