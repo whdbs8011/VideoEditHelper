@@ -441,7 +441,9 @@ async function findMatchingClip(items, mediaPath, allowFileNameFallback = false)
     try {
       const clip = ppro.ClipProjectItem.cast(match);
       if (clip && samePath(await clip.getMediaFilePath(), mediaPath)) return match;
-      if (allowFileNameFallback && clip && match.name === expectedName) nameMatches.push(match);
+      if (allowFileNameFallback && clip && foldPath(match.name) === foldPath(expectedName)) {
+        nameMatches.push(match);
+      }
     } catch (_) {
       // Folder and sequence items cannot be cast to ClipProjectItem.
     }

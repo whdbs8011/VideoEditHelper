@@ -92,7 +92,7 @@ const videoOnlyPlacement = plugin.placeOverwriteItem(
 assert.strictEqual(videoOnlyPlacement.success, true);
 
 const importedClip = {
-  name: "1.mp4",
+  name: "1.MP4",
   mediaPath: "premiere-canonical-path",
   getId() { return "imported-1"; },
   async getMediaFilePath() { return this.mediaPath; }
