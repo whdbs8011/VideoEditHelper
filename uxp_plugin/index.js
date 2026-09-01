@@ -434,21 +434,33 @@ function errorMessage(error) {
   return error && error.message ? error.message : String(error || "unknown error");
 }
 
-async function findMatchingClip(items, mediaPath, allowFileNameFallback = false) {
+async function findMatchingClip(
+  items,
+  mediaPath,
+  allowFileNameFallback = false,
+  allowControlledDuplicateFallback = false
+) {
   const expectedName = String(mediaPath).replace(/\\/g, "/").split("/").pop();
   const nameMatches = [];
   for (const match of items) {
     try {
       const clip = ppro.ClipProjectItem.cast(match);
       if (clip && samePath(await clip.getMediaFilePath(), mediaPath)) return match;
-      if (allowFileNameFallback && clip && foldPath(match.name) === foldPath(expectedName)) {
-        nameMatches.push(match);
-      }
     } catch (_) {
-      // Folder and sequence items cannot be cast to ClipProjectItem.
+      // Folder and sequence items cannot be cast to ClipProjectItem. Their
+      // ProjectItem name is still usable below for a controlled fallback.
+    }
+    // ProjectItem.name is available even when Premiere cannot cast a freshly
+    // imported item to ClipProjectItem yet (a common transient host state).
+    if (allowFileNameFallback && foldPath(match.name) === foldPath(expectedName)) {
+      nameMatches.push(match);
     }
   }
-  return nameMatches.length === 1 ? nameMatches[0] : null;
+  if (nameMatches.length === 1) return nameMatches[0];
+  // The panel imports only already-unambiguous source files into its own bin.
+  // Repeated runs can leave duplicate project items for that same source, so
+  // accept the first matching name only for this controlled bin lookup.
+  return allowControlledDuplicateFallback && nameMatches.length ? nameMatches[0] : null;
 }
 
 async function findProjectItem(mediaPath, importBin = null) {
@@ -463,7 +475,7 @@ async function findProjectItem(mediaPath, importBin = null) {
   // immediately after import. The import bin is controlled by this panel, so
   // a single matching filename there is a safe fallback to its clip item.
   const binItems = await importBin.getItems();
-  return findMatchingClip(binItems, mediaPath, true);
+  return findMatchingClip(binItems, mediaPath, true, true);
 }
 
 async function findProjectItemSafely(mediaPath, importBin = null) {
@@ -473,6 +485,25 @@ async function findProjectItemSafely(mediaPath, importBin = null) {
     console.error(`Project item lookup failed: ${mediaPath}`, error);
     return null;
   }
+}
+
+async function findImportedItemsInBin(importBin, candidates) {
+  const items = await importBin.getItems();
+  const byName = new Map();
+  for (const item of items) appendLookup(byName, foldPath(item.name), item);
+
+  const found = new Map();
+  for (const candidate of candidates) {
+    const expectedName = String(candidate.mediaPath).replace(/\\/g, "/").split("/").pop();
+    const item = await findMatchingClip(
+      byName.get(foldPath(expectedName)) || [],
+      candidate.mediaPath,
+      true,
+      true
+    );
+    if (item) found.set(candidate.key, item);
+  }
+  return found;
 }
 
 async function asFolder(item) {
@@ -658,7 +689,10 @@ async function buildTimeline() {
     try {
       targetBin = await getOrCreateBin(project, binName);
     } catch (error) {
-      warnings.push(`미디어 임포트 빈을 만들지 못해 ${missing.length}개 파일을 건너뜀`);
+      warnings.push(
+        `미디어 임포트 빈을 만들지 못해 ${missing.length}개 파일을 건너뜀 ` +
+        `(${errorMessage(error)})`
+      );
       console.error(error);
     }
 
@@ -667,41 +701,73 @@ async function buildTimeline() {
       try {
         targetProjectItem = ppro.ProjectItem.cast(targetBin);
       } catch (error) {
-        warnings.push(`미디어 임포트 빈을 사용할 수 없어 ${missing.length}개 파일을 건너뜀`);
+        warnings.push(
+          `미디어 임포트 빈을 사용할 수 없어 ${missing.length}개 파일을 건너뜀 ` +
+          `(${errorMessage(error)})`
+        );
         console.error(error);
       }
     }
 
     if (targetProjectItem) {
       try {
-        await project.importFiles(
+        const importedBatch = await project.importFiles(
           missing.map(candidate => candidate.mediaPath),
           true,
           targetProjectItem,
           false
         );
+        if (!importedBatch) {
+          warnings.push("일괄 미디어 임포트가 false를 반환함; 파일별로 재시도 중");
+        }
       } catch (error) {
         console.error("Batch import failed; retrying individually", error);
+        warnings.push(`일괄 미디어 임포트 실패: ${errorMessage(error)}; 개별 재시도 중`);
       }
 
-      for (const candidate of missing) {
-        let item = await findProjectItemSafely(candidate.mediaPath, targetBin);
-        if (!item) {
-          try {
-            const importedOne = await project.importFiles(
-              [candidate.mediaPath],
-              true,
-              targetProjectItem,
-              false
+      // Premiere updates the bin asynchronously after import. One short wait and
+      // a single bin scan is much faster than polling every source file in turn.
+      await new Promise(resolve => setTimeout(resolve, 500));
+      let foundItems = await findImportedItemsInBin(targetBin, missing);
+      const retryCandidates = missing.filter(candidate => !foundItems.has(candidate.key));
+
+      for (const candidate of retryCandidates) {
+        try {
+          const importedOne = await project.importFiles(
+            [candidate.mediaPath],
+            true,
+            targetProjectItem,
+            false
+          );
+          if (!importedOne) {
+            warnings.push(
+              `${candidate.sourceRow}행 경고: Premiere 임포트가 false를 반환함 ` +
+              `(${candidate.mediaPath})`
             );
-            if (importedOne) item = await findProjectItemSafely(candidate.mediaPath, targetBin);
-          } catch (error) {
-            console.error(`Import failed: ${candidate.mediaPath}`, error);
           }
+        } catch (error) {
+          console.error(`Import failed: ${candidate.mediaPath}`, error);
+          warnings.push(
+            `${candidate.sourceRow}행 경고: Premiere 임포트 호출 실패 ` +
+            `(${candidate.mediaPath}: ${errorMessage(error)})`
+          );
         }
+      }
+
+      if (retryCandidates.length) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        foundItems = await findImportedItemsInBin(targetBin, missing);
+      }
+      for (const candidate of missing) {
+        const item = foundItems.get(candidate.key);
         if (item) {
           imported += 1;
           projectItemByPath.set(candidate.key, item);
+        } else {
+          warnings.push(
+            `${candidate.sourceRow}행 경고: Premiere는 임포트 성공을 반환했지만 프로젝트에서 찾지 못함 ` +
+            `(${candidate.mediaPath})`
+          );
         }
       }
     }
@@ -811,8 +877,15 @@ window.addEventListener("load", () => {
         ? ` / 대체 테이크 ${result.takeFallbacks}개`
         : "";
       const skippedDetails = result.skipped ? ` / 빈 구간 ${result.skipped}개` : "";
-      const warningDetails = result.warnings.length
-        ? `\n${result.warnings.slice(0, 20).join("\n")}${result.warnings.length > 20 ? "\n…" : ""}`
+      // Put the actionable Premiere failures first. Media-resolution warnings can be
+      // numerous and previously hid an import or timeline error below the first 20 lines.
+      const actionableWarnings = result.warnings.filter(warning =>
+        /임포트 빈|일괄 미디어 임포트|임포트 호출 실패|Premiere 임포트 실패|Premiere 임포트가 false|임포트 성공을 반환했지만|시퀀스에 V\d+ 트랙이 없음|타임라인 배치 실패/.test(warning)
+      );
+      const remainingWarnings = result.warnings.filter(warning => !actionableWarnings.includes(warning));
+      const visibleWarnings = [...actionableWarnings, ...remainingWarnings];
+      const warningDetails = visibleWarnings.length
+        ? `\n${visibleWarnings.slice(0, 20).join("\n")}${visibleWarnings.length > 20 ? "\n…" : ""}`
         : "";
       setStatus(
         result.skipped || result.warnings.length ? "warning" : "success",
